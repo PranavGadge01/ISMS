@@ -5,7 +5,7 @@ ISMS is a Flask + SQLite backend with a React 18/Vite single-page frontend. The 
 ## Prerequisites
 
 - Python 3.10 or later
-- Node.js 18 or later and npm (pnpm also works)
+- Node.js 18 or later and pnpm 9 (lockfile version 9)
 
 ## Development
 
@@ -27,8 +27,8 @@ Terminal 2, install and run React with its `/api` proxy to Flask:
 
 ```powershell
 cd frontend
-npm install
-npm run dev
+pnpm install --frozen-lockfile
+pnpm run dev
 ```
 
 Open the Vite URL printed in Terminal 2. Flask runs on `http://127.0.0.1:5000`.
@@ -37,17 +37,17 @@ Open the Vite URL printed in Terminal 2. Flask runs on `http://127.0.0.1:5000`.
 
 ```powershell
 cd frontend
-npm install
-npm run build
+pnpm install --frozen-lockfile
+pnpm run build
 cd ..
 python app.py
 ```
 
-Open `http://127.0.0.1:5000`. Flask serves the React app and API from the same origin. For a public deployment, use a production WSGI server and set a strong `SECRET_KEY`; `python app.py` is for local use.
+Open `http://127.0.0.1:5000`. Flask serves the React app and API from the same origin. For a public deployment, use a production WSGI server, set `ISMS_ENV=production`, and provide a strong `SECRET_KEY` through the deployment secret manager; `python app.py` is for local use. Local development generates an ephemeral random key when `SECRET_KEY` is unset, so sessions are cleared when the process restarts.
 
 ## Database and demo logins
 
-The default SQLite database is `instance/isms.db`. Tables are created and seed data is added on first run. No separate database process is required. All demo passwords are `Pass@123`.
+The default SQLite database is `instance/isms.db`. Tables are created and local demo seed data is added on first run. No separate database process is required. Demo accounts and the shared `Pass@123` password are for local development only; demo seed creation is disabled in production. The project currently has no tracked migration framework and uses startup schema creation plus compatibility `ALTER TABLE` statements.
 
 | Username | Role | Approver |
 |---|---|---|
@@ -69,7 +69,7 @@ Legacy demo usernames are also retained: `administrator`, `inventory_manager`, `
 | Procurement Officer | Supplier management, PO creation/submission/sending/cancellation, receipts, alerts, and purchasing reports. Cannot approve POs. |
 | Sales Staff | Create sales, invoices, returns, view products/stock, and see only their own sales. |
 | Warehouse Staff | View products/stock/POs, receive sent orders, count/transfer stock, and submit small adjustments. Large adjustments require approval. |
-| Auditor | Read-only product, stock, supplier, PO, sales, alert, report and login-log access. Writes are denied by the API. |
+| Auditor | Read-only product, stock, supplier, PO, sales, alert, report and business audit-log access. Security login logs are Administrator-only. Writes are denied by the API. |
 
 API permissions are defined in `permissions.py`; `GET /api/auth/me` returns the permission keys used by the React UI. Every API write is checked server-side.
 
@@ -93,7 +93,7 @@ API permissions are defined in `permissions.py`; `GET /api/auth/me` returns the 
 
 ## Simplifications
 
-- Password reset links are displayed in the app; no email is sent. Notifications are in-app only.
+- Password reset links are displayed only in local development; no email delivery is configured. Notifications are in-app only.
 - Print views use browser Print / Save as PDF; the app does not generate PDF files.
 - This is a single organisation, English-language, INR-only demo. Accounting, payments, SSO, email/SMS and external integrations are not included.
 - PO rejection returns the PO to Draft with its rejection reason retained. The creator may approve their own PO only when they are the sole active approver.
@@ -104,7 +104,9 @@ API permissions are defined in `permissions.py`; `GET /api/auth/me` returns the 
 Run backend and API tests with:
 
 ```powershell
-python -m pytest -q
+python -m pytest -q --basetemp .pytest_tmp
 ```
 
-Build the React frontend with `npm run build` from `frontend/`.
+Build the React frontend with `pnpm run build` from `frontend/`.
+
+The sanitized variable list is in `.env.example`. The application does not load dotenv files automatically; set variables in the shell or deployment environment.
