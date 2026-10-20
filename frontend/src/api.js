@@ -1,0 +1,1 @@
+import axios from'axios';const api=axios.create({baseURL:'/api',withCredentials:true,headers:{'Content-Type':'application/json'}});api.interceptors.response.use(r=>r,e=>{if(e.response?.status===401&&!location.pathname.startsWith('/login'))location.assign('/login');return Promise.reject(e)});export default api;

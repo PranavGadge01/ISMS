@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Test and tool caches
+.pytest_cache/
+.pytest_tmp*/
+
+# Node dependencies and package-manager cache
+node_modules/
+.pnpm-store/
+
+# Generated frontend build
+frontend/dist/
+
+# Local database and instance data
+instance/*.db
+instance/*.db-*

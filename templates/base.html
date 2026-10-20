@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}Dashboard{% endblock %} · ISMS</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static',filename='favicon.svg') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="{{ url_for('static',filename='style.css') }}" rel="stylesheet">
+</head>
+<body>
+<nav class="navbar navbar-expand-xl app-navbar">
+  <div class="container-fluid app-nav-inner">
+    <a class="navbar-brand brand-lockup" href="{{ url_for('main.dashboard') }}"><img class="brand-mark-img" src="{{ url_for('static',filename='brand-mark.svg') }}" alt=""><span>stockroom<span class="brand-dot">.</span><small>INVENTORY WORKSPACE</small></span></a>
+    {% if current_user %}
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#appNav" aria-label="Toggle navigation"><span class="navbar-toggler-icon"></span></button>
+    <div class="collapse navbar-collapse" id="appNav">
+      <ul class="navbar-nav app-nav-links me-auto">
+        <li class="nav-item"><a class="nav-link {% if request.endpoint=='main.dashboard' %}active{% endif %}" href="{{ url_for('main.dashboard') }}"><svg class="nav-icon"><use href="{{ url_for('static',filename='icons.svg') }}#grid"/></svg>Overview</a></li>
+        <li class="nav-item"><a class="nav-link {% if request.endpoint in ['main.products','main.product_new','main.product_detail','main.product_edit'] %}active{% endif %}" href="{{ url_for('main.products') }}"><svg class="nav-icon"><use href="{{ url_for('static',filename='icons.svg') }}#box"/></svg>Products</a></li>
+        <li class="nav-item"><a class="nav-link {% if request.endpoint=='main.stock_page' %}active{% endif %}" href="{{ url_for('main.stock_page') }}">Stock</a></li>
+        {% if current_user.role=='Inventory Manager' %}<li class="nav-item"><a class="nav-link" href="{{ url_for('main.categories') }}">Categories</a></li><li class="nav-item"><a class="nav-link" href="{{ url_for('main.warehouses') }}">Warehouses</a></li>{% endif %}
+        {% if current_user.role in ['Procurement Officer','Administrator','Auditor','Inventory Manager'] %}<li class="nav-item"><a class="nav-link {% if request.endpoint=='main.alerts' %}active{% endif %}" href="{{ url_for('main.alerts') }}">Alerts <span class="nav-count">{{ open_alert_count }}</span></a></li>{% endif %}
+        {% if current_user.role in ['Procurement Officer','Auditor','Administrator'] %}<li class="nav-item"><a class="nav-link {% if (request.endpoint or '').startswith('main.supplier') %}active{% endif %}" href="{{ url_for('main.suppliers') }}">Suppliers</a></li>{% endif %}
+        {% if current_user.role in ['Procurement Officer','Warehouse Staff','Auditor','Administrator','Inventory Manager'] %}<li class="nav-item"><a class="nav-link {% if (request.endpoint or '').startswith('main.po_') or request.endpoint=='main.purchase_orders' %}active{% endif %}" href="{{ url_for('main.purchase_orders') }}">Purchase orders</a></li>{% endif %}
+        {% if current_user.role in ['Sales Staff','Administrator','Auditor'] %}<li class="nav-item"><a class="nav-link {% if (request.endpoint or '').startswith('main.sale') or request.endpoint=='main.invoice' %}active{% endif %}" href="{{ url_for('main.sales') }}">Sales</a></li>{% endif %}
+        <li class="nav-item"><a class="nav-link {% if request.endpoint=='main.reports' %}active{% endif %}" href="{{ url_for('main.reports') }}"><svg class="nav-icon"><use href="{{ url_for('static',filename='icons.svg') }}#chart"/></svg>Reports</a></li>
+        {% if current_user.role=='Administrator' %}<li class="nav-item"><a class="nav-link" href="{{ url_for('main.users') }}">Users</a></li><li class="nav-item"><a class="nav-link" href="{{ url_for('main.settings') }}">Settings</a></li>{% endif %}{% if current_user.role in ['Administrator','Auditor'] %}<li class="nav-item"><a class="nav-link" href="{{ url_for('main.login_log') }}">Login log</a></li>{% endif %}
+      </ul>
+      <div class="nav-account"><span class="avatar">{{ current_user.username[:1]|upper }}</span><span class="account-copy"><strong>{{ current_user.username }}</strong><small>{{ current_user.role }}</small></span><a class="signout" href="{{ url_for('auth.logout') }}" title="Sign out" aria-label="Sign out">↗</a></div>
+    </div>
+    {% endif %}
+  </div>
+</nav>
+<main class="container-fluid app-shell">
+  {% with messages=get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<div class="alert alert-{{ category }} app-alert alert-dismissible fade show" role="alert">{{ message }}<button class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div>{% endfor %}{% endwith %}
+  {% block content %}{% endblock %}
+</main>
+<footer class="app-footer">ISMS <span>·</span> Inventory, made clear.</footer>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+{% block scripts %}{% endblock %}
+</body></html>

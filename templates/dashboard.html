@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+{% block title %}Overview{% endblock %}
+{% block content %}
+<div class="page-heading"><div><div class="eyebrow">YOUR BUSINESS AT A GLANCE</div><h1>Good to see you, {{ current_user.username }}.</h1><p>Here’s what’s happening across your inventory today.</p></div>
+  <div class="d-flex gap-2">{% if current_user.role=='Sales Staff' %}<a class="btn btn-primary" href="{{ url_for('main.sale_new') }}">＋ Record a sale</a>{% elif current_user.role=='Procurement Officer' %}<a class="btn btn-primary" href="{{ url_for('main.po_new') }}">＋ Create purchase order</a>{% elif current_user.role=='Inventory Manager' %}<a class="btn btn-primary" href="{{ url_for('main.product_new') }}">＋ Add product</a>{% endif %}</div>
+</div>
+<div class="row g-3 mb-4">
+  <div class="col-6 col-xl-3"><div class="card stat"><div class="card-body"><div class="d-flex justify-content-between align-items-center"><span class="stat-label">Stock valuation</span><span class="stat-icon"><svg class="ui-icon"><use href="{{ url_for('static',filename='icons.svg') }}#box"/></svg></span></div><div class="stat-value">₹{{ '{:,.0f}'.format(stock_value) }}</div><div class="stat-note">At current cost price</div></div></div></div>
+  <div class="col-6 col-xl-3"><div class="card stat"><div class="card-body"><div class="d-flex justify-content-between align-items-center"><span class="stat-label">Sales today</span><span class="stat-icon"><svg class="ui-icon"><use href="{{ url_for('static',filename='icons.svg') }}#chart"/></svg></span></div><div class="stat-value">₹{{ '{:,.0f}'.format(today_sales) }}</div><div class="stat-note">Across all recorded invoices</div></div></div></div>
+  <div class="col-6 col-xl-3"><div class="card stat"><div class="card-body"><div class="d-flex justify-content-between align-items-center"><span class="stat-label">Open purchase orders</span><span class="stat-icon"><svg class="ui-icon"><use href="{{ url_for('static',filename='icons.svg') }}#orders"/></svg></span></div><div class="stat-value">{{ pending }}</div><div class="stat-note">Awaiting action or delivery</div></div></div></div>
+  <div class="col-6 col-xl-3"><div class="card stat"><div class="card-body"><div class="d-flex justify-content-between align-items-center"><span class="stat-label">Low stock alerts</span><span class="stat-icon"><svg class="ui-icon"><use href="{{ url_for('static',filename='icons.svg') }}#alert"/></svg></span></div><div class="stat-value">{{ low|length }}</div><div class="stat-note">Items at or below reorder point</div></div></div></div>
+</div>
+<div class="row g-3">
+  <div class="col-xl-8"><div class="card h-100"><div class="card-body"><div class="card-header-clean"><div><h2 class="section-title">Sales trend</h2><p class="section-subtitle">Daily revenue over the last seven days</p></div><span class="badge bg-secondary">LAST 7 DAYS</span></div><canvas id="salesChart" height="105"></canvas></div></div></div>
+  <div class="col-xl-4"><div class="card h-100"><div class="card-body"><div class="card-header-clean"><div><h2 class="section-title">Needs attention</h2><p class="section-subtitle">Products at or below reorder point</p></div><a class="small-link" href="{{ url_for('main.alerts') if current_user.role in ['Inventory Manager','Procurement Officer','Auditor','Administrator'] else url_for('main.products') }}">View all →</a></div>
+  {% for x in low[:7] %}<div class="attention-row"><span class="attention-dot"></span><div class="attention-copy"><a href="{{ url_for('main.product_detail',pid=x.product_id) }}">{{ x.product.name }}</a><small>{{ x.product.sku }} · {{ x.warehouse.name }}</small></div><span class="qty-pill">{{ x.quantity_on_hand }} left</span></div>{% else %}<div class="empty-state"><strong>All stocked up</strong>No products need a reorder right now.</div>{% endfor %}
+  </div></div></div>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+const ctx=document.getElementById('salesChart');
+new Chart(ctx,{type:'line',data:{labels:{{ days|tojson }},datasets:[{label:'Sales (₹)',data:{{ sales|tojson }},borderColor:'#237c5b',backgroundColor:'rgba(35,124,91,.10)',fill:true,tension:.38,pointRadius:3,pointHoverRadius:5,pointBackgroundColor:'#237c5b',borderWidth:2}]},options:{responsive:true,plugins:{legend:{display:false},tooltip:{backgroundColor:'#17231f',padding:12,displayColors:false}},scales:{x:{grid:{display:false},border:{display:false},ticks:{color:'#89958e',font:{family:'DM Sans'}}},y:{beginAtZero:true,grid:{color:'#edf1ed'},border:{display:false},ticks:{color:'#89958e',font:{family:'DM Sans'},callback:value=>'₹'+value.toLocaleString('en-IN')}}}}});
+</script>{% endblock %}

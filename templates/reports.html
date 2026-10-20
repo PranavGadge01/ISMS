@@ -1,0 +1,35 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1 class="h2 mb-4">Reports</h1>
+<div class="row g-3">
+  <div class="col-md-6"><div class="card"><div class="card-body">
+    <div class="d-flex justify-content-between"><h2 class="h5">Stock Valuation</h2><a class="btn btn-sm btn-outline-primary" href="{{ url_for('main.report_csv',kind='stock') }}">Export CSV</a></div>
+    <p>{{ levels|length }} warehouse stock rows · cost valuation ₹{{ '%.2f'|format(stock_cost) }}</p><canvas id="stockChart" height="110"></canvas>
+  </div></div></div>
+  <div class="col-md-6"><div class="card"><div class="card-body">
+    <div class="d-flex justify-content-between"><h2 class="h5">Sales Report</h2><a class="btn btn-sm btn-outline-primary" href="{{ url_for('main.report_csv',kind='sales') }}">Export CSV</a></div>
+    <p>{{ sales|length }} invoices · gross sales ₹{{ '%.2f'|format(sales|sum(attribute='total')) }}</p><canvas id="salesReportChart" height="110"></canvas>
+  </div></div></div>
+  <div class="col-md-6"><div class="card"><div class="card-body">
+    <div class="d-flex justify-content-between"><h2 class="h5">Purchase Report</h2><a class="btn btn-sm btn-outline-primary" href="{{ url_for('main.report_csv',kind='purchase') }}">Export CSV</a></div>
+    <p>{{ pos|length }} purchase orders · value ₹{{ '%.2f'|format(pos|sum(attribute='total')) }}</p>
+    <table class="table table-sm"><tr><th>Supplier</th><th>Orders</th><th>Value</th></tr>{% for supplier in suppliers %}{% set supplier_pos=pos|selectattr('supplier_id','equalto',supplier.id)|list %}<tr><td>{{ supplier.name }}</td><td>{{ supplier_pos|length }}</td><td>₹{{ '%.2f'|format(supplier_pos|sum(attribute='total')) }}</td></tr>{% endfor %}</table>
+  </div></div></div>
+  <div class="col-md-6"><div class="card"><div class="card-body">
+    <div class="d-flex justify-content-between"><h2 class="h5">Stock Movement</h2><a class="btn btn-sm btn-outline-primary" href="{{ url_for('main.report_csv',kind='movement') }}">Export CSV</a></div>
+    <p>{{ movements|length }} stock movements</p><div class="table-responsive"><table class="table table-sm"><tr><th>Date</th><th>Item</th><th>Type</th><th>Qty</th><th>Balance</th></tr>{% for m in movements[:10] %}<tr><td>{{ m.timestamp.strftime('%m-%d') }}</td><td>{{ m.product.sku }}</td><td>{{ m.type }}</td><td>{{ m.quantity }}</td><td>{{ m.balance_after }}</td></tr>{% endfor %}</table></div>
+  </div></div></div>
+  <div class="col-md-6"><div class="card"><div class="card-body">
+    <div class="d-flex justify-content-between"><h2 class="h5">Low Stock / Reorder</h2><a class="btn btn-sm btn-outline-primary" href="{{ url_for('main.report_csv',kind='low') }}">Export CSV</a></div>
+    <p>{{ alerts|length }} open alerts</p>{% for a in alerts %}<div>{{ a.product.name }} · {{ a.warehouse.name }} · threshold {{ a.product.reorder_level }}</div>{% endfor %}
+  </div></div></div>
+  <div class="col-md-6"><div class="card"><div class="card-body">
+    <div class="d-flex justify-content-between"><h2 class="h5">Supplier Performance</h2><a class="btn btn-sm btn-outline-primary" href="{{ url_for('main.report_csv',kind='supplier') }}">Export CSV</a></div>
+    <p>{{ suppliers|length }} suppliers</p>{% for supplier in suppliers %}<div>{{ supplier.name }} · {{ supplier.purchase_orders|length }} purchase orders</div>{% endfor %}
+  </div></div></div>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+new Chart(document.getElementById('stockChart'),{type:'bar',data:{labels:{{ stock_labels|tojson }},datasets:[{label:'Cost value (₹)',data:{{ stock_values|tojson }},backgroundColor:'#0d6efd'}]},options:{responsive:true}});
+new Chart(document.getElementById('salesReportChart'),{type:'line',data:{labels:{{ sales_days|tojson }},datasets:[{label:'Sales (₹)',data:{{ sales_values|tojson }},borderColor:'#198754',tension:.2}]},options:{responsive:true}});
+</script>{% endblock %}
