@@ -24,6 +24,8 @@ def test_permissions_and_auditor_writes_blocked(app):
     assert c.post('/api/purchase-orders/2/approve').status_code==403
     assert c.post('/api/sales',json={}).status_code==403
     assert c.put('/api/settings',json={'tax_rate':0}).status_code==403
+    assert c.get('/api/audit-log').status_code==200
+    assert c.get('/api/login-log').status_code==403
 
 def test_sales_staff_only_sees_own_transactions_and_permissions(app):
     c=app.test_client(); api_login(c,'sales'); response=c.get('/api/sales'); assert response.status_code==200
@@ -31,6 +33,55 @@ def test_sales_staff_only_sees_own_transactions_and_permissions(app):
         me=User.query.filter_by(username='sales').first(); assert all(x['processed_by']==me.id for x in response.get_json()['items'])
         assert SalesTransaction.query.count()>=10
     assert c.get('/api/users').status_code==403
+
+def test_sales_staff_cannot_return_another_staff_member_sale(app):
+    with app.app_context():
+        sale=SalesTransaction.query.first(); line=sale.lines[0]; sale_id=sale.id; line_id=line.id; before=line.returned_qty
+        assert sale.processed_by!=User.query.filter_by(username='sales_staff').first().id
+    c=app.test_client(); api_login(c,'sales_staff')
+    response=c.post(f'/api/sales/{sale_id}/returns/{line_id}',json={'quantity':1})
+    assert response.status_code==404
+    with app.app_context(): assert db.session.get(__import__('models').SalesTransactionLine,line_id).returned_qty==before
+
+def test_sale_service_uses_server_price_not_client_price(app):
+    from services import complete_sale
+    from models import Product, Warehouse
+    with app.app_context():
+        product=Product.query.filter_by(sku='FOO-0003').first(); warehouse=Warehouse.query.first(); user=User.query.filter_by(username='sales').first()
+        expected=product.selling_price
+        sale=complete_sale([{'product_id':product.id,'quantity':1,'unit_price':0.01}],user.id,warehouse.id,'Cash')
+        assert sale.lines[0].unit_price==expected
+        assert sale.total>expected
+
+def test_procurement_cannot_override_po_price_or_edit_another_draft(app):
+    c=app.test_client(); api_login(c,'procure')
+    supplier= c.get('/api/suppliers').get_json()['items'][0]
+    response=c.post('/api/purchase-orders',json={'supplier_id':supplier['id']})
+    assert response.status_code==201
+    po=response.get_json(); product_id=1
+    response=c.post(f"/api/purchase-orders/{po['id']}/lines",json={'product_id':product_id,'quantity':1,'unit_price':999999})
+    assert response.status_code==403
+    other=app.test_client(); api_login(other,'procurement_officer')
+    response=other.post(f"/api/purchase-orders/{po['id']}/lines",json={'product_id':product_id,'quantity':1})
+    assert response.status_code==403
+
+def test_concurrent_sales_cannot_oversell_last_unit(app):
+    from concurrent.futures import ThreadPoolExecutor
+    from services import complete_sale
+    from models import Product, Warehouse
+    with app.app_context():
+        product=Product.query.filter_by(sku='FOO-0003').first(); warehouse=Warehouse.query.first(); user=User.query.filter_by(username='sales').first()
+        level=StockLevel.query.filter_by(product_id=product.id,warehouse_id=warehouse.id).first(); level.quantity_on_hand=1; db.session.commit()
+        product_id,warehouse_id,user_id=product.id,warehouse.id,user.id
+    def sell_once():
+        try:
+            with app.app_context(): complete_sale([{'product_id':product_id,'quantity':1}],user_id,warehouse_id,'Cash'); return True
+        except Exception: return False
+    with ThreadPoolExecutor(max_workers=2) as pool: outcomes=list(pool.map(lambda _:sell_once(),range(2)))
+    with app.app_context():
+        level=StockLevel.query.filter_by(product_id=product_id,warehouse_id=warehouse_id).first()
+        assert sum(outcomes)==1
+        assert level.quantity_on_hand==0
 
 def test_po_approval_and_warehouse_adjustment_permissions(app):
     c=app.test_client(); api_login(c,'procure'); assert c.get('/api/purchase-orders').status_code==200; assert c.post('/api/purchase-orders/2/approve').status_code==403
@@ -56,7 +107,7 @@ def test_stock_quantity_matches_transaction_ledger_after_service_sequence(app):
     ('procure','/api/suppliers','POST /api/products'),
     ('sales','/api/sales','POST /api/stock/transfer'),
     ('warehouse','/api/purchase-orders','POST /api/purchase-orders'),
-    ('auditor','/api/login-log','/api/users'),
+    ('auditor','/api/audit-log','/api/users'),
 ])
 def test_role_read_permissions(app,username,allowed,denied):
     c=app.test_client(); api_login(c,username)
