@@ -4,7 +4,8 @@ from flask import Blueprint, render_template, request, redirect, url_for, flash,
 from werkzeug.security import generate_password_hash
 from models import db, User, Category, Warehouse, Product, StockLevel, StockTransaction, Supplier, ProductSupplier, PurchaseOrder, PurchaseOrderLine, SalesTransaction, SalesTransactionLine, LowStockAlert, Setting, LoginLog
 from auth import role_required
-from services import adjust_stock, transfer_stock, stock_count, receive_goods, complete_sale, process_return, StockError
+from services import adjust_stock, transfer_stock, stock_count, receive_goods, complete_sale, process_return, StockError, request_stock_adjustment
+from permissions import permissions_for
 
 bp=Blueprint('main',__name__)
 ADMIN=('Administrator',); INV=('Inventory Manager',); PROC=('Procurement Officer',); SALE=('Sales Staff',); WH=('Warehouse Staff',); READ=('Administrator','Inventory Manager','Procurement Officer','Sales Staff','Warehouse Staff','Auditor')
@@ -75,7 +76,12 @@ def product_active(pid):
 @bp.route('/products/<int:pid>/adjust',methods=['POST'])
 @role_required(*INV,'Warehouse Staff')
 def adjustment(pid):
-    try: adjust_stock(pid,request.form.get('warehouse_id',type=int),request.form.get('quantity',type=int),session['user_id'],request.form.get('reason'),request.form.get('comment','')); db.session.commit(); flash('Stock adjusted.','success')
+    try:
+        user=session_user(); qty=request.form.get('quantity',type=int); direction=request.form.get('direction')
+        if direction not in {'Increase','Decrease'}: raise StockError('Choose an adjustment direction.')
+        signed=qty if direction=='Increase' else -qty; threshold=float((db.session.get(Setting,'adjustment_approval_threshold') or Setting(value='100')).value or 100)
+        if user.role=='Warehouse Staff' and abs(signed)>threshold: request_stock_adjustment(pid,request.form.get('warehouse_id',type=int),direction,abs(signed),user.id,request.form.get('reason'),request.form.get('comment','')); flash('Large adjustment submitted for approval.','success')
+        else: adjust_stock(pid,request.form.get('warehouse_id',type=int),signed,user.id,request.form.get('reason'),request.form.get('comment','')); flash('Stock adjusted.','success')
     except Exception as e: db.session.rollback(); flash(str(e),'danger')
     return redirect(url_for('main.product_detail',pid=pid))
 @bp.route('/products.csv')
@@ -97,7 +103,10 @@ def stock_adjust():
         try:
             qty=request.form.get('quantity',type=int); direction=request.form.get('direction'); signed=qty if direction=='Increase' else -qty if direction=='Decrease' else 0
             if not qty or qty<=0: raise ValueError('Quantity must be greater than zero.')
-            adjust_stock(request.form.get('product_id',type=int),request.form.get('warehouse_id',type=int),signed,session['user_id'],request.form.get('reason'),request.form.get('comment','')); flash('Stock adjustment saved.','success'); return redirect(url_for('main.stock_page'))
+            user=session_user(); threshold=float((db.session.get(Setting,'adjustment_approval_threshold') or Setting(value='100')).value or 100)
+            if user.role=='Warehouse Staff' and qty>threshold: request_stock_adjustment(request.form.get('product_id',type=int),request.form.get('warehouse_id',type=int),direction,qty,user.id,request.form.get('reason'),request.form.get('comment','')); flash('Large adjustment submitted for approval.','success')
+            else: adjust_stock(request.form.get('product_id',type=int),request.form.get('warehouse_id',type=int),signed,user.id,request.form.get('reason'),request.form.get('comment','')); flash('Stock adjustment saved.','success')
+            return redirect(url_for('main.stock_page'))
         except Exception as e: db.session.rollback(); flash(str(e),'danger')
     return render_template('stock_adjust.html',products=Product.query.filter_by(is_active=True).all(),warehouses=Warehouse.query.all())
 @bp.route('/stock/transfer',methods=['GET','POST'])
@@ -304,10 +313,13 @@ def po_detail(poid):
 def po_add_line(poid):
     po=PurchaseOrder.query.get_or_404(poid)
     try:
+        if po.created_by!=session['user_id']: raise ValueError('Only the draft creator can edit its lines.')
         if po.status!='Draft': raise ValueError('Lines can only be changed on a draft PO.')
         pid=request.form.get('product_id',type=int); qty=request.form.get('quantity',type=int); price=request.form.get('unit_price',type=float)
         if not pid or not qty or qty<=0: raise ValueError('Choose a product and enter a quantity greater than zero.')
         product=Product.query.get_or_404(pid); link=ProductSupplier.query.filter_by(product_id=pid,supplier_id=po.supplier_id).first(); price=price if price is not None else (link.supplier_price if link else product.cost_price)
+        default_price=link.supplier_price if link else product.cost_price
+        if price!=default_price and 'po.price.override' not in permissions_for(session_user()): raise ValueError('Price overrides require explicit permission.')
         if price<0: raise ValueError('Unit price cannot be negative.')
         line=PurchaseOrderLine.query.filter_by(po_id=po.id,product_id=pid).first()
         if line: line.ordered_qty+=qty; line.unit_price=price
@@ -320,9 +332,12 @@ def po_add_line(poid):
 def po_edit_line(poid,lineid):
     po=PurchaseOrder.query.get_or_404(poid); line=PurchaseOrderLine.query.filter_by(id=lineid,po_id=poid).first_or_404()
     try:
+        if po.created_by!=session['user_id']: raise ValueError('Only the draft creator can edit its lines.')
         if po.status!='Draft': raise ValueError('Lines can only be changed on a draft PO.')
         qty=request.form.get('quantity',type=int); price=request.form.get('unit_price',type=float)
         if not qty or qty<=0 or price is None or price<0: raise ValueError('Enter a positive quantity and non-negative price.')
+        link=ProductSupplier.query.filter_by(product_id=line.product_id,supplier_id=po.supplier_id).first(); default_price=link.supplier_price if link else line.product.cost_price
+        if price!=line.unit_price and price!=default_price and 'po.price.override' not in permissions_for(session_user()): raise ValueError('Price overrides require explicit permission.')
         line.ordered_qty=qty; line.unit_price=price; recalculate_po(po); db.session.commit(); flash('Line updated.','success')
     except Exception as e: db.session.rollback(); flash(str(e),'danger')
     return redirect(url_for('main.po_detail',poid=poid))
@@ -330,7 +345,7 @@ def po_edit_line(poid,lineid):
 @role_required(*PROC)
 def po_remove_line(poid,lineid):
     po=PurchaseOrder.query.get_or_404(poid); line=PurchaseOrderLine.query.filter_by(id=lineid,po_id=poid).first_or_404()
-    if po.status=='Draft': db.session.delete(line); recalculate_po(po); db.session.commit(); flash('Line removed.','success')
+    if po.status=='Draft' and po.created_by==session['user_id']: db.session.delete(line); recalculate_po(po); db.session.commit(); flash('Line removed.','success')
     else: flash('Lines can only be removed from a draft PO.','danger')
     return redirect(url_for('main.po_detail',poid=poid))
 @bp.route('/purchase-orders/<int:poid>/submit',methods=['POST'])
@@ -376,7 +391,10 @@ def po_send(poid):
 @bp.route('/purchase-orders/<int:poid>/receive',methods=['POST'])
 @role_required(*WH,'Procurement Officer','Inventory Manager')
 def po_receive(poid):
-    try: receive_goods(poid,request.form.get('warehouse_id',type=int),request.form,session['user_id'],request.form.get('accept_overdelivery')=='on'); flash('Receipt saved and stock updated.','success')
+    try:
+        accept=request.form.get('accept_overdelivery')=='on'
+        if accept and session_user().role not in {'Administrator','Procurement Officer'}: abort(403)
+        receive_goods(poid,request.form.get('warehouse_id',type=int),request.form,session['user_id'],accept); flash('Receipt saved and stock updated.','success')
     except Exception as e: flash(str(e),'danger')
     return redirect(url_for('main.po_detail',poid=poid))
 @bp.route('/purchase-orders/<int:poid>/cancel',methods=['POST'])
@@ -411,16 +429,22 @@ def sale_new():
     return render_template('sale_form.html',products=Product.query.filter_by(is_active=True).all(),warehouses=Warehouse.query.all())
 @bp.route('/sales')
 @role_required(*READ)
-def sales(): return render_template('sales.html',items=SalesTransaction.query.order_by(SalesTransaction.sale_date.desc()).all())
+def sales():
+    query=SalesTransaction.query
+    if session_user().role=='Sales Staff': query=query.filter_by(processed_by=session['user_id'])
+    return render_template('sales.html',items=query.order_by(SalesTransaction.sale_date.desc()).all())
 @bp.route('/sales/<int:saleid>')
 @role_required(*READ)
-def invoice(saleid): return render_template('invoice.html',sale=SalesTransaction.query.get_or_404(saleid),warehouses=Warehouse.query.all())
+def invoice(saleid):
+    sale=SalesTransaction.query.get_or_404(saleid)
+    if session_user().role=='Sales Staff' and sale.processed_by!=session['user_id']: abort(404)
+    return render_template('invoice.html',sale=sale,warehouses=Warehouse.query.all())
 @bp.route('/sales/<int:saleid>/return/<int:lineid>',methods=['POST'])
 @role_required(*SALE)
 def sale_return(saleid,lineid):
+    line=SalesTransactionLine.query.filter_by(id=lineid,sale_id=saleid).first_or_404()
+    if session_user().role=='Sales Staff' and line.sale.processed_by!=session['user_id']: abort(404)
     try:
-        line=SalesTransactionLine.query.get_or_404(lineid)
-        if line.sale_id!=saleid: raise StockError('This item does not belong to the selected invoice.')
         process_return(lineid,request.form.get('quantity',type=int),session['user_id'],request.form.get('warehouse_id',type=int)); flash('Return recorded.','success')
     except Exception as e: flash(str(e),'danger')
     return redirect(url_for('main.invoice',saleid=saleid))
@@ -452,7 +476,9 @@ def users():
     if request.method=='POST':
         username=request.form.get('username','').strip(); email=request.form.get('email','').strip()
         if User.query.filter(db.or_(User.username==username,User.email==email)).first(): flash('Username or email already exists.','danger')
-        else: db.session.add(User(username=username,email=email,password_hash=generate_password_hash(request.form.get('password','Pass@123')),role=request.form.get('role'),is_approver=request.form.get('is_approver')=='on')); db.session.commit(); flash('User created.','success')
+        elif len(request.form.get('password',''))<8: flash('A temporary password of at least 8 characters is required.','danger')
+        elif request.form.get('role') not in {'Administrator','Inventory Manager','Procurement Officer','Sales Staff','Warehouse Staff','Auditor'}: flash('Choose a supported role.','danger')
+        else: db.session.add(User(username=username,email=email,password_hash=generate_password_hash(request.form['password']),role=request.form['role'],is_approver=request.form.get('is_approver')=='on')); db.session.commit(); flash('User created.','success')
     return render_template('users.html',items=User.query.order_by(User.username).all(),logs=LoginLog.query.order_by(LoginLog.timestamp.desc()).limit(100).all(),roles=['Administrator','Inventory Manager','Procurement Officer','Sales Staff','Warehouse Staff','Auditor'])
 @bp.route('/users/<int:uid>/toggle',methods=['POST'])
 @role_required(*ADMIN)

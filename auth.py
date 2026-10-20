@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import Blueprint, render_template, request, redirect, url_for, flash, session, abort
@@ -43,7 +44,7 @@ def logout(): session.clear(); return redirect(url_for('auth.login'))
 def forgot():
     if request.method=='POST':
         user=User.query.filter_by(username=request.form.get('username','').strip()).first()
-        if user:
+        if user and os.environ.get('ISMS_ENV','').lower()!='production':
             import secrets
             token=secrets.token_urlsafe(24); session['reset_'+token]=user.id; session['reset_exp_'+token]=(datetime.utcnow()+timedelta(minutes=15)).isoformat(); return render_template('forgot.html',reset_url=url_for('auth.reset',token=token,_external=True))
         flash('If that account exists, a reset link is ready.','info')

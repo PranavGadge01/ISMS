@@ -1,7 +1,11 @@
 """All inventory mutations are centralized here and committed atomically."""
-from models import db, StockLevel, StockTransaction, LowStockAlert, Product, PurchaseOrder, SalesTransaction, SalesTransactionLine, Setting, GoodsReceipt, GoodsReceiptLine, POHistory, Notification, User, StockAdjustmentRequest
+from models import db, StockLevel, StockTransaction, LowStockAlert, Product, PurchaseOrder, SalesTransaction, SalesTransactionLine, Setting, GoodsReceipt, GoodsReceiptLine, POHistory, Notification, User, StockAdjustmentRequest, AuditLog
+import json
 
 class StockError(ValueError): pass
+
+def record_audit(event_type, actor_id, target_type, target_id=None, details=None):
+    db.session.add(AuditLog(actor_id=actor_id,event_type=event_type,target_type=target_type,target_id=str(target_id) if target_id is not None else None,details=json.dumps(details or {},separators=(',',':'))))
 
 def _level(product_id, warehouse_id):
     row=StockLevel.query.filter_by(product_id=product_id,warehouse_id=warehouse_id).with_for_update().first()
@@ -12,10 +16,17 @@ def _level(product_id, warehouse_id):
 def _change(product_id, warehouse_id, delta, user_id, kind, reason='', reference='', flagged=False):
     product=db.session.get(Product,product_id)
     if not product: raise StockError('Product not found.')
-    level=_level(product_id,warehouse_id); updated=level.quantity_on_hand+int(delta)
-    if updated<0: raise StockError(f'Insufficient stock for {product.sku} — {product.name}.')
-    level.quantity_on_hand=updated
+    delta=int(delta)
+    level=_level(product_id,warehouse_id)
+    changed=StockLevel.query.filter_by(id=level.id).filter(StockLevel.quantity_on_hand+delta>=0).update(
+        {StockLevel.quantity_on_hand:StockLevel.quantity_on_hand+delta},synchronize_session=False
+    )
+    if changed!=1: raise StockError(f'Insufficient stock for {product.sku} — {product.name}.')
+    db.session.flush()
+    db.session.refresh(level)
+    updated=level.quantity_on_hand
     db.session.add(StockTransaction(product_id=product_id,warehouse_id=warehouse_id,user_id=user_id,type=kind,quantity=int(delta),balance_after=updated,reason=reason,reference=reference,is_flagged=flagged))
+    record_audit('STOCK_MOVEMENT',user_id,'product',product_id,{'warehouse_id':warehouse_id,'type':kind,'quantity_delta':delta,'balance_after':updated,'reason':reason,'reference':reference,'flagged':bool(flagged)})
     check_low_stock(product_id,warehouse_id,updated)
     return updated
 
@@ -34,7 +45,22 @@ def adjust_stock(product_id, warehouse_id, quantity, user_id, reason, comment=''
     if reason not in {'Opening Stock','Damage','Theft','Count Correction','Other'}: raise StockError('Choose a valid adjustment reason.')
     if not int(quantity): raise StockError('Adjustment quantity cannot be zero.')
     try:
+        user=db.session.get(User,user_id); threshold_row=db.session.get(Setting,'adjustment_approval_threshold'); threshold=float(threshold_row.value) if threshold_row else 100
+        if user and user.role=='Warehouse Staff' and abs(int(quantity))>threshold: raise StockError('Large warehouse adjustments must be submitted for approval.')
         balance=_change(product_id,warehouse_id,quantity,user_id,'ADJUSTMENT',reason+(': '+comment if comment else ''),flagged=flagged); db.session.commit(); return balance
+    except Exception:
+        db.session.rollback(); raise
+
+def request_stock_adjustment(product_id,warehouse_id,direction,quantity,user_id,reason,comment=''):
+    quantity=int(quantity)
+    if direction not in {'Increase','Decrease'} or quantity<=0: raise StockError('Choose a direction and a positive quantity.')
+    if reason not in {'Opening Stock','Damage','Theft','Count Correction','Other'}: raise StockError('Choose a valid adjustment reason.')
+    try:
+        row=StockAdjustmentRequest(product_id=product_id,warehouse_id=warehouse_id,direction=direction,quantity=quantity,reason=reason,comment=comment,requested_by=user_id,status='Pending')
+        db.session.add(row); db.session.flush()
+        record_audit('STOCK_ADJUSTMENT_REQUESTED',user_id,'stock_adjustment_request',row.id,{'product_id':product_id,'warehouse_id':warehouse_id,'direction':direction,'quantity':quantity,'reason':reason})
+        notify_roles(['Administrator','Inventory Manager'],'A large stock adjustment needs approval.','/approvals?tab=stock',exclude=user_id,approvers=True)
+        db.session.commit(); return row
     except Exception:
         db.session.rollback(); raise
 
@@ -78,6 +104,7 @@ def receive_goods(po_id, warehouse_id, quantities, user_id, accept_overdelivery=
                 _change(line.product_id,warehouse_id,qty,user_id,'RECEIPT','Purchase order receipt',po.po_number); line.received_qty+=qty; receipt.lines.append(GoodsReceiptLine(product_id=line.product_id,quantity=qty)); accepted.append(line.product.name)
         po.status='Fully Received' if all(l.received_qty>=l.ordered_qty for l in po.lines) else 'Partially Received'
         db.session.add(POHistory(po_id=po.id,action='Received',user_id=user_id,note=', '.join(accepted)))
+        record_audit('PURCHASE_ORDER_RECEIVED',user_id,'purchase_order',po.id,{'po_number':po.po_number,'warehouse_id':warehouse_id,'lines':len(accepted),'status':po.status})
         notify_user(po.created_by,f'{po.po_number} goods were received.','/purchase-orders/'+str(po.id))
         db.session.commit(); return po
     except Exception:
@@ -86,14 +113,23 @@ def receive_goods(po_id, warehouse_id, quantities, user_id, accept_overdelivery=
 def complete_sale(cart, user_id, warehouse_id, payment_method, discount=0, customer_name='', customer_phone=''):
     try:
         setting= db.session.get(__import__('models').Setting,'tax_rate'); tax_rate=float(setting.value) if setting else 18
-        discount=float(discount); subtotal=sum(int(x['quantity'])*float(x['unit_price']) for x in cart)
+        if not cart: raise StockError('Add at least one item to the sale.')
+        if payment_method not in {'Cash','Card','UPI','Other'}: raise StockError('Choose a supported payment method.')
+        discount=float(discount)
+        priced=[]
+        for item in cart:
+            qty=int(item['quantity']); p=db.session.get(Product,int(item['product_id']))
+            if not p or not p.is_active: raise StockError('A selected product is unavailable.')
+            if qty<=0: raise StockError('Sale quantities must be positive.')
+            priced.append((p,qty,float(p.selling_price)))
+        subtotal=sum(qty*price for _,qty,price in priced)
+        if discount<0 or discount>subtotal: raise StockError('Discount must be between zero and the sale subtotal.')
         sale=SalesTransaction(processed_by=user_id,invoice_number='PENDING',payment_method=payment_method,discount=discount,customer_name=customer_name,customer_phone=customer_phone)
         sale.tax=max(0,subtotal-discount)*tax_rate/100; sale.total=max(0,subtotal-discount)+sale.tax; db.session.add(sale); db.session.flush(); sale.invoice_number=f'INV-{sale.id:04d}'
-        for item in cart:
-            qty=int(item['quantity']); p=db.session.get(Product,item['product_id'])
-            if qty<=0: raise StockError('Sale quantities must be positive.')
-            line=SalesTransactionLine(product_id=p.id,warehouse_id=warehouse_id,quantity=qty,unit_price=float(item['unit_price'])); sale.lines.append(line)
+        for p,qty,price in priced:
+            line=SalesTransactionLine(product_id=p.id,warehouse_id=warehouse_id,quantity=qty,unit_price=price); sale.lines.append(line)
             _change(p.id,warehouse_id,-qty,user_id,'SALE','Retail sale',sale.invoice_number)
+        record_audit('SALE_COMPLETED',user_id,'sale',sale.id,{'invoice_number':sale.invoice_number,'line_count':len(priced),'total':round(sale.total,2)})
         db.session.commit(); return sale
     except Exception:
         db.session.rollback(); raise
@@ -101,10 +137,15 @@ def complete_sale(cart, user_id, warehouse_id, payment_method, discount=0, custo
 def process_return(line_id, quantity, user_id, warehouse_id=None):
     try:
         line=SalesTransactionLine.query.get_or_404(line_id); qty=int(quantity)
-        if qty<=0 or line.returned_qty+qty>line.quantity: raise StockError('Return exceeds the quantity originally sold.')
+        if qty<=0: raise StockError('Return quantity must be greater than zero.')
         warehouse_id=warehouse_id or line.warehouse_id
         if not warehouse_id: raise StockError('Choose a warehouse for this return.')
-        _change(line.product_id,warehouse_id,qty,user_id,'RETURN','Customer return',line.sale.invoice_number); line.returned_qty+=qty; db.session.commit(); return line
+        changed=SalesTransactionLine.query.filter_by(id=line_id).filter(
+            SalesTransactionLine.returned_qty+qty<=SalesTransactionLine.quantity
+        ).update({SalesTransactionLine.returned_qty:SalesTransactionLine.returned_qty+qty},synchronize_session=False)
+        if changed!=1: raise StockError('Return exceeds the quantity originally sold.')
+        _change(line.product_id,warehouse_id,qty,user_id,'RETURN','Customer return',line.sale.invoice_number)
+        db.session.flush(); db.session.refresh(line); record_audit('SALE_RETURN',user_id,'sale_line',line.id,{'quantity':qty,'invoice_number':line.sale.invoice_number}); db.session.commit(); return line
     except Exception:
         db.session.rollback(); raise
 

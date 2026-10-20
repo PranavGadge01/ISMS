@@ -1,4 +1,4 @@
-import os
+import os, secrets
 from flask import Flask, render_template, send_from_directory, request
 from models import db
 from auth import auth
@@ -6,8 +6,10 @@ from routes import bp
 from api import api
 
 def create_app(test_config=None):
-    app=Flask(__name__); app.config.update(SECRET_KEY=os.environ.get('SECRET_KEY','isms-development-key-change-me'),SQLALCHEMY_DATABASE_URI='sqlite:///'+os.path.join(app.instance_path,'isms.db'),SQLALCHEMY_TRACK_MODIFICATIONS=False)
+    app=Flask(__name__); app.config.update(SECRET_KEY=os.environ.get('SECRET_KEY') or secrets.token_urlsafe(32),SQLALCHEMY_DATABASE_URI='sqlite:///'+os.path.join(app.instance_path,'isms.db'),SQLALCHEMY_TRACK_MODIFICATIONS=False,SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE='Lax',SESSION_COOKIE_SECURE=os.environ.get('ISMS_ENV','').lower()=='production')
     if test_config: app.config.update(test_config)
+    if os.environ.get('ISMS_ENV','').lower()=='production' and not os.environ.get('SECRET_KEY'):
+        raise RuntimeError('SECRET_KEY must be configured when ISMS_ENV=production.')
     os.makedirs(app.instance_path,exist_ok=True); db.init_app(app); app.register_blueprint(auth); app.register_blueprint(bp); app.register_blueprint(api)
     @app.before_request
     def serve_react_routes():
@@ -21,6 +23,12 @@ def create_app(test_config=None):
     def forbidden(error): return render_template('error.html',code=403,title='Access denied',message='You do not have permission to view this page.'),403
     @app.errorhandler(404)
     def not_found(error): return render_template('error.html',code=404,title='Page not found',message='We could not find that page.'),404
+    @app.after_request
+    def security_headers(response):
+        response.headers.setdefault('X-Content-Type-Options','nosniff')
+        response.headers.setdefault('X-Frame-Options','DENY')
+        response.headers.setdefault('Referrer-Policy','strict-origin-when-cross-origin')
+        return response
     @app.cli.command('init-db')
     def init_db():
         from seed import seed_data
@@ -35,8 +43,9 @@ def create_app(test_config=None):
             for name,sql_type in columns.items():
                 if name not in existing:
                     with db.engine.begin() as connection: connection.execute(text(f'ALTER TABLE {table} ADD COLUMN {name} {sql_type}'))
-        from seed import seed_data
-        seed_data()
+        if os.environ.get('ISMS_ENV','').lower()!='production':
+            from seed import seed_data
+            seed_data()
     return app
 
 app=create_app()

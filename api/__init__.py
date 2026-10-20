@@ -1,11 +1,11 @@
 """JSON API consumed by the React client. Legacy Jinja routes remain available."""
 from datetime import datetime, date, timedelta
-import csv, io
+import csv, io, uuid, os, math
 from flask import Blueprint, jsonify, request, session, Response
 from werkzeug.security import check_password_hash, generate_password_hash
-from models import db, User, LoginLog, Product, Category, Warehouse, StockLevel, StockTransaction, Supplier, ProductSupplier, PurchaseOrder, PurchaseOrderLine, SalesTransaction, SalesTransactionLine, LowStockAlert, Setting, Notification, StockAdjustmentRequest, POHistory, GoodsReceipt
+from models import db, User, LoginLog, Product, Category, Warehouse, StockLevel, StockTransaction, Supplier, ProductSupplier, PurchaseOrder, PurchaseOrderLine, SalesTransaction, SalesTransactionLine, LowStockAlert, Setting, Notification, StockAdjustmentRequest, POHistory, GoodsReceipt, AuditLog
 from permissions import permission_required, permissions_for
-from services import adjust_stock, transfer_stock, stock_count, receive_goods, complete_sale, process_return, check_low_stock, StockError, notify_user, notify_roles, _change
+from services import adjust_stock, transfer_stock, stock_count, receive_goods, complete_sale, process_return, check_low_stock, StockError, notify_user, notify_roles, _change, record_audit, request_stock_adjustment
 
 api=Blueprint('api',__name__,url_prefix='/api')
 
@@ -18,6 +18,7 @@ def _po(p): return {'id':p.id,'po_number':p.po_number,'supplier_id':p.supplier_i
 def _sale(s): return {'id':s.id,'invoice_number':s.invoice_number,'date':s.sale_date.isoformat(),'staff':s.staff.username,'processed_by':s.processed_by,'customer_name':s.customer_name,'payment_method':s.payment_method,'subtotal':sum(l.quantity*l.unit_price for l in s.lines),'discount':s.discount,'tax':s.tax,'total':s.total,'lines':[{'id':l.id,'product_id':l.product_id,'product':l.product.name,'quantity':l.quantity,'returned_qty':l.returned_qty,'unit_price':l.unit_price,'warehouse_id':l.warehouse_id} for l in s.lines]}
 def _record(po,action,user_id,note=''):
     db.session.add(POHistory(po_id=po.id,action=action,user_id=user_id,note=note))
+    record_audit('PURCHASE_ORDER_'+action.upper().replace(' ','_'),user_id,'purchase_order',po.id,{'po_number':po.po_number,'status':po.status,'note':note})
 
 @api.post('/auth/login')
 def login_api():
@@ -45,7 +46,8 @@ def me_api():
 @api.post('/auth/forgot')
 def forgot_api():
     body=request.get_json(silent=True) or {}; user=User.query.filter_by(username=(body.get('username') or '').strip()).first()
-    if not user: return jsonify(message='If the account exists, a reset link is ready.')
+    generic={'message':'If the account exists, a reset link is ready.'}
+    if not user or os.environ.get('ISMS_ENV','').lower()=='production': return jsonify(**generic)
     import secrets
     token=secrets.token_urlsafe(24); session['reset_'+token]=user.id; session['reset_exp_'+token]=(datetime.utcnow()+timedelta(minutes=15)).isoformat()
     return jsonify(message='Reset link ready.',reset_url='/reset/'+token)
@@ -94,7 +96,7 @@ def product_api(pid):
 def create_product_api():
     b=request.get_json(silent=True) or {}; name=(b.get('name') or '').strip(); sku=(b.get('sku') or '').strip().upper()
     if not name: return jsonify(error='Product name is required.',fields={'name':'Required.'}),400
-    if not sku: sku=f"SKU-{int(datetime.utcnow().timestamp())}"
+    if not sku: sku=f"SKU-{uuid.uuid4().hex[:12].upper()}"
     if Product.query.filter_by(sku=sku).first(): return jsonify(error='SKU already exists.',fields={'sku':'SKU already exists.'}),400
     try:
         p=Product(sku=sku,name=name,category_id=b.get('category_id'),unit=b.get('unit') or 'pcs',cost_price=float(b.get('cost_price') or 0),selling_price=float(b.get('selling_price') or 0),reorder_level=int(b.get('reorder_level') or 0),reorder_qty=int(b.get('reorder_qty') or 0)); db.session.add(p); db.session.flush()
@@ -186,7 +188,8 @@ def stock_adjust_api():
     b=request.get_json(silent=True) or {}; user=_user(); qty=int(b.get('quantity') or 0); direction=b.get('direction'); amount=qty if direction=='Increase' else -qty if direction=='Decrease' else 0; threshold=float((db.session.get(Setting,'adjustment_approval_threshold') or Setting(value='100')).value or 100)
     if qty<=0 or not amount: return jsonify(error='Enter a positive quantity and direction.',fields={'quantity':'Must be greater than zero.'}),400
     if qty>threshold and user.role=='Warehouse Staff':
-        row=StockAdjustmentRequest(product_id=b.get('product_id'),warehouse_id=b.get('warehouse_id'),direction=direction,quantity=qty,reason=b.get('reason'),comment=b.get('comment'),requested_by=user.id); db.session.add(row); db.session.flush(); notify_roles(['Administrator','Inventory Manager'],'A large stock adjustment needs approval.','/approvals?tab=stock',exclude=user.id,approvers=True); db.session.commit(); return jsonify(request_id=row.id,status=row.status),201
+        try: row=request_stock_adjustment(int(b.get('product_id')),int(b.get('warehouse_id')),direction,qty,user.id,b.get('reason'),b.get('comment','')); return jsonify(request_id=row.id,status=row.status),201
+        except Exception as e: return jsonify(error=str(e)),400
     if qty>threshold and 'stock.adjust.large' not in permissions_for(user): return jsonify(error='Large adjustments are not permitted for your role.'),403
     try: balance=adjust_stock(int(b.get('product_id')),int(b.get('warehouse_id')),amount,user.id,b.get('reason','Other'),b.get('comment',''),flagged=qty>threshold); return jsonify(balance=balance,flagged=qty>threshold)
     except Exception as e: return jsonify(error=str(e)),400
@@ -272,23 +275,31 @@ def po_detail_api(poid):
 @api.post('/purchase-orders/<int:poid>/lines')
 @permission_required('po.create')
 def po_line_add_api(poid):
-    po=PurchaseOrder.query.get_or_404(poid); b=request.get_json(silent=True) or {}; qty=int(b.get('quantity') or 0)
+    po=PurchaseOrder.query.get_or_404(poid); b=request.get_json(silent=True) or {}; qty=int(b.get('quantity') or 0); user=_user()
+    if po.created_by!=user.id: return jsonify(error='Only the draft creator can edit its lines.'),403
     if po.status!='Draft' or qty<=0: return jsonify(error='Draft PO and positive quantity required.'),400
-    product=Product.query.get_or_404(b.get('product_id')); link=ProductSupplier.query.filter_by(product_id=product.id,supplier_id=po.supplier_id).first(); price=float(b.get('unit_price') if b.get('unit_price') is not None else link.supplier_price if link else product.cost_price); line=PurchaseOrderLine.query.filter_by(po_id=po.id,product_id=product.id).first()
+    product=Product.query.get_or_404(b.get('product_id')); link=ProductSupplier.query.filter_by(product_id=product.id,supplier_id=po.supplier_id).first(); default_price=float(link.supplier_price if link else product.cost_price); requested=b.get('unit_price')
+    if requested is not None and float(requested)!=default_price and 'po.price.override' not in permissions_for(user): return jsonify(error='Price overrides require explicit permission.'),403
+    price=float(requested if requested is not None else default_price)
+    if price<0: return jsonify(error='Unit price cannot be negative.'),400
+    line=PurchaseOrderLine.query.filter_by(po_id=po.id,product_id=product.id).first()
     if line: line.ordered_qty+=qty; line.unit_price=price
     else: po.lines.append(PurchaseOrderLine(product_id=product.id,ordered_qty=qty,unit_price=price))
     _recalc(po); db.session.commit(); return jsonify(_po(po))
 @api.put('/purchase-orders/<int:poid>/lines/<int:lid>')
 @permission_required('po.create')
 def po_line_edit_api(poid,lid):
-    po=PurchaseOrder.query.get_or_404(poid); line=PurchaseOrderLine.query.filter_by(id=lid,po_id=poid).first_or_404(); b=request.get_json(silent=True) or {}
-    qty=int(b.get('quantity') or 0); price=float(b.get('unit_price') or 0)
+    po=PurchaseOrder.query.get_or_404(poid); line=PurchaseOrderLine.query.filter_by(id=lid,po_id=poid).first_or_404(); b=request.get_json(silent=True) or {}; user=_user()
+    if po.created_by!=user.id: return jsonify(error='Only the draft creator can edit its lines.'),403
+    qty=int(b.get('quantity') or 0); price=float(b['unit_price']) if 'unit_price' in b else float(line.unit_price)
     if po.status!='Draft' or qty<=0 or price<0: return jsonify(error='Draft PO, positive quantity and non-negative price required.'),400
+    if price!=float(line.unit_price) and 'po.price.override' not in permissions_for(user): return jsonify(error='Price overrides require explicit permission.'),403
     line.ordered_qty=qty; line.unit_price=price; _recalc(po); db.session.commit(); return jsonify(_po(po))
 @api.delete('/purchase-orders/<int:poid>/lines/<int:lid>')
 @permission_required('po.create')
 def po_line_remove_api(poid,lid):
     po=PurchaseOrder.query.get_or_404(poid); line=PurchaseOrderLine.query.filter_by(id=lid,po_id=poid).first_or_404()
+    if po.created_by!=_user().id: return jsonify(error='Only the draft creator can edit its lines.'),403
     if po.status!='Draft': return jsonify(error='PO lines are locked after submission.'),400
     db.session.delete(line); db.session.flush(); _recalc(po); db.session.commit(); return jsonify(_po(po))
 def _recalc(po):
@@ -297,6 +308,7 @@ def _recalc(po):
 @permission_required('po.create')
 def po_submit_api(poid):
     po=PurchaseOrder.query.get_or_404(poid); user=_user()
+    if po.created_by!=user.id: return jsonify(error='Only the draft creator can submit this PO.'),403
     if po.status!='Draft' or not po.lines: return jsonify(error='Only a non-empty Draft PO can be submitted.'),400
     _recalc(po); row=db.session.get(Setting,'po_approval_limit'); limit=float(row.value) if row else 50000; po.submitted_at=datetime.utcnow()
     if po.total<=limit: po.status='Approved'; po.approved_by=user.id; po.approved_at=datetime.utcnow(); action='Auto-approved'; notify_user(po.created_by,f'{po.po_number} was auto-approved.','/purchase-orders/'+str(po.id))
@@ -428,6 +440,8 @@ def sale_detail_api(sid):
 @permission_required('sale.return')
 def return_api(sid,lineid):
     line=SalesTransactionLine.query.filter_by(id=lineid,sale_id=sid).first_or_404()
+    user=_user()
+    if user.role=='Sales Staff' and line.sale.processed_by!=user.id: return jsonify(error='Not found.'),404
     try: process_return(lineid,int((request.get_json(silent=True) or {}).get('quantity',0)),_user().id); return jsonify(_sale(line.sale))
     except Exception as e: return jsonify(error=str(e)),400
 
@@ -439,6 +453,7 @@ def users_api(): return jsonify(items=[{'id':x.id,'username':x.username,'email':
 def user_create_api():
     b=request.get_json(silent=True) or {}; username=(b.get('username') or '').strip(); email=(b.get('email') or '').strip()
     if not username or not email or not b.get('password'): return jsonify(error='Username, email and temporary password are required.'),400
+    if b.get('role') not in {'Administrator','Inventory Manager','Procurement Officer','Sales Staff','Warehouse Staff','Auditor'}: return jsonify(error='Choose a supported role.',fields={'role':'Invalid role.'}),400
     if User.query.filter(db.or_(User.username==username,User.email==email)).first(): return jsonify(error='Username or email already exists.'),400
     u=User(username=username,email=email,password_hash=generate_password_hash(b['password']),role=b.get('role'),is_approver=bool(b.get('is_approver'))); db.session.add(u); db.session.commit(); return jsonify(id=u.id,username=u.username),201
 @api.put('/users/<int:uid>')
@@ -446,8 +461,13 @@ def user_create_api():
 def user_edit_api(uid):
     u=User.query.get_or_404(uid); b=request.get_json(silent=True) or {}
     if 'is_active' in b and not b['is_active'] and u.id==_user().id: return jsonify(error='You cannot deactivate yourself.'),400
+    if 'role' in b and b['role'] not in {'Administrator','Inventory Manager','Procurement Officer','Sales Staff','Warehouse Staff','Auditor'}: return jsonify(error='Choose a supported role.',fields={'role':'Invalid role.'}),400
+    removes_admin=(u.is_active and u.role=='Administrator' and (b.get('role',u.role)!='Administrator' or b.get('is_active',u.is_active) is False))
+    if removes_admin and User.query.filter_by(role='Administrator',is_active=True).count()<=1: return jsonify(error='The last active administrator cannot be removed or deactivated.'),400
+    before={'role':u.role,'is_active':u.is_active,'is_approver':u.is_approver}
     for key in ['email','full_name','role','is_approver','is_active']:
         if key in b: setattr(u,key,b[key])
+    record_audit('USER_UPDATED',_user().id,'user',u.id,{'before':before,'after':{'role':u.role,'is_active':u.is_active,'is_approver':u.is_approver}})
     db.session.commit(); return jsonify(id=u.id,username=u.username,role=u.role,is_active=u.is_active,is_approver=u.is_approver)
 @api.post('/users/<int:uid>/reset-password')
 @permission_required('user.manage')
@@ -462,13 +482,25 @@ def settings_api(): return jsonify(settings={x.key:x.value for x in Setting.quer
 @permission_required('settings.manage')
 def settings_save_api():
     b=request.get_json(silent=True) or {}
+    changed={}
     for key,value in b.items():
         if key in {'po_approval_limit','tax_rate','max_discount_percent','adjustment_approval_threshold','company_name','company_address'}:
-            row=db.session.get(Setting,key) or Setting(key=key,value=''); row.value=str(value); db.session.add(row)
+            if key in {'po_approval_limit','tax_rate','max_discount_percent','adjustment_approval_threshold'}:
+                try: number=float(value)
+                except (TypeError,ValueError): return jsonify(error=f'{key} must be a number.',fields={key:'Enter a valid number.'}),400
+                if not math.isfinite(number) or number<0 or (key in {'tax_rate','max_discount_percent'} and number>100): return jsonify(error=f'{key} is outside the allowed range.',fields={key:'Enter a value from 0 to 100.'}),400
+            elif len(str(value))>200: return jsonify(error=f'{key} is too long.',fields={key:'Maximum length is 200 characters.'}),400
+            row=db.session.get(Setting,key) or Setting(key=key,value=''); changed[key]={'before':row.value,'after':str(value)}; row.value=str(value); db.session.add(row)
+    if changed: record_audit('SYSTEM_SETTINGS_UPDATED',_user().id,'settings','system',changed)
     db.session.commit(); return jsonify(ok=True)
 @api.get('/login-log')
 @permission_required('loginlog.view')
 def loginlog_api(): return _page(LoginLog.query.order_by(LoginLog.timestamp.desc()),lambda x:{'id':x.id,'username':x.username,'success':x.success,'ip':x.ip_address,'timestamp':x.timestamp.isoformat()})
+
+@api.get('/audit-log')
+@permission_required('audit.business.read')
+def audit_log_api():
+    return _page(AuditLog.query.order_by(AuditLog.timestamp.desc()),lambda x:{'id':x.id,'actor':x.actor.username if x.actor else None,'event_type':x.event_type,'target_type':x.target_type,'target_id':x.target_id,'outcome':x.outcome,'details':x.details,'timestamp':x.timestamp.isoformat()})
 
 @api.get('/reports/<kind>')
 def report_api(kind):

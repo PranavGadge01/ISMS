@@ -62,3 +62,6 @@ class GoodsReceiptLine(db.Model):
 
 class Notification(db.Model):
     id=db.Column(db.Integer,primary_key=True); user_id=db.Column(db.Integer,db.ForeignKey('user.id'),nullable=False); message=db.Column(db.String(500),nullable=False); link=db.Column(db.String(300)); is_read=db.Column(db.Boolean,default=False); created_at=db.Column(db.DateTime,default=datetime.utcnow); user=db.relationship('User')
+
+class AuditLog(db.Model):
+    id=db.Column(db.Integer,primary_key=True); actor_id=db.Column(db.Integer,db.ForeignKey('user.id')); event_type=db.Column(db.String(80),nullable=False); target_type=db.Column(db.String(80),nullable=False); target_id=db.Column(db.String(80)); outcome=db.Column(db.String(20),nullable=False,default='success'); details=db.Column(db.Text); timestamp=db.Column(db.DateTime,default=datetime.utcnow,nullable=False); actor=db.relationship('User')

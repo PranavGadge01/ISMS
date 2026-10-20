@@ -1,9 +1,12 @@
+import os
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash
 from models import db, User, Category, Warehouse, Product, StockLevel, StockTransaction, Supplier, ProductSupplier, PurchaseOrder, PurchaseOrderLine, SalesTransaction, SalesTransactionLine, Setting, LowStockAlert, StockAdjustmentRequest, Notification, POHistory, GoodsReceipt, GoodsReceiptLine
 
 ROLES=['Administrator','Inventory Manager','Procurement Officer','Sales Staff','Warehouse Staff','Auditor']
 def seed_data():
+    if os.environ.get('ISMS_ENV','').lower()=='production':
+        raise RuntimeError('Demo seed data is disabled in production. Set up the first administrator through the deployment setup process.')
     if User.query.first():
         aliases={'admin':'Administrator','invmgr':'Inventory Manager','procure':'Procurement Officer','sales':'Sales Staff','warehouse':'Warehouse Staff','auditor':'Auditor'}
         for username,role in aliases.items():
