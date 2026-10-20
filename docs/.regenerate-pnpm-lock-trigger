@@ -1,0 +1,1 @@
+Temporary trigger for the one-time GitHub Actions workflow that regenerates the truncated frontend/pnpm-lock.yaml. This file should be deleted after lockfile repair.
