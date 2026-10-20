@@ -8,14 +8,14 @@ The 20-test pytest suite currently exercises selected paths, not every registere
 - Purchase order creation, approval behavior, and Warehouse Staff adjustment permissions.
 - Stock adjustment, transfer/count flows, ledger consistency, receiving, sales, low-stock alerts, and a return in one integrated workflow.
 - Duplicate SKU handling, sale rejection for insufficient stock, receipt stock increases, return quantity limits, and five-failure login lockout.
-- Regression cases for cross-user returns, server-controlled sale prices, draft ownership and price override enforcement, and concurrent attempts to sell the last unit.
+- Regression cases for cross-user returns, server-controlled sale prices, draft ownership and price override enforcement, concurrent attempts to sell the last unit, and idempotent sale/receipt/return retries.
 
 ## Coverage still required
 
 1. The API catalog lists 64 API method/path pairs. Add route-specific tests for every pair, including unauthenticated access, role denial, missing/invalid fields, invalid IDs, boundaries, persistence, and unchanged state after failures. Twenty-eight pairs currently have at least one named pytest reference in the catalog; this is not full endpoint coverage.
 2. Test the 51 legacy Jinja route rules and four authentication route rules for authorization parity with the JSON API.
 3. Add explicit cases for PO self-approval with multiple/sole approvers, approval threshold boundaries, rejection/re-submission, illegal cancellation, and over-delivery authorization.
-4. Add failure-injection tests proving sales and receipts roll back all stock, ledger, receipt, and transaction changes on a mid-operation error. Test duplicate/retried sale and receipt requests; durable idempotency keys do not currently exist.
+4. Add failure-injection tests proving sales and receipts roll back all stock, ledger, receipt, and transaction changes on a mid-operation error. Exercise concurrent requests using the same idempotency key and verify behavior after client restarts.
 5. Assert audit-event persistence and actor/target details for each important action. Coverage for selected audit access exists; complete event coverage and an audit UI do not.
 6. Test alert deduplication, clearing and re-triggering; password-reset token expiry/one-use, idle-session expiry, logout, and production reset delivery behavior.
 7. Add frontend browser E2E against the real Flask backend, including each role's navigation and the PO, receipt, sales, return, alert, and report journeys. The current sandbox blocks loopback socket access (Windows error 10013), so live HTTP/browser E2E was not possible here.

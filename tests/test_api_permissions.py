@@ -43,13 +43,25 @@ def test_sales_staff_cannot_return_another_staff_member_sale(app):
     assert response.status_code==404
     with app.app_context(): assert db.session.get(__import__('models').SalesTransactionLine,line_id).returned_qty==before
 
+def test_sales_api_requires_and_replays_idempotency_key(app):
+    c=app.test_client(); api_login(c,'sales')
+    with app.app_context():
+        product=__import__('models').Product.query.filter_by(sku='FOO-0003').first(); warehouse=__import__('models').Warehouse.query.first()
+        body={'items':[{'product_id':product.id,'quantity':1}],'warehouse_id':warehouse.id,'payment_method':'Cash'}
+    assert c.post('/api/sales',json=body).status_code==428
+    first=c.post('/api/sales',json=body,headers={'Idempotency-Key':'api-sale-replay'}); assert first.status_code==201
+    replay=c.post('/api/sales',json=body,headers={'Idempotency-Key':'api-sale-replay'}); assert replay.status_code==200
+    assert replay.get_json()['id']==first.get_json()['id']
+    changed={**body,'items':[{'product_id':body['items'][0]['product_id'],'quantity':2}]}
+    assert c.post('/api/sales',json=changed,headers={'Idempotency-Key':'api-sale-replay'}).status_code==409
+
 def test_sale_service_uses_server_price_not_client_price(app):
     from services import complete_sale
     from models import Product, Warehouse
     with app.app_context():
         product=Product.query.filter_by(sku='FOO-0003').first(); warehouse=Warehouse.query.first(); user=User.query.filter_by(username='sales').first()
         expected=product.selling_price
-        sale=complete_sale([{'product_id':product.id,'quantity':1,'unit_price':0.01}],user.id,warehouse.id,'Cash')
+        sale=complete_sale([{'product_id':product.id,'quantity':1,'unit_price':0.01}],user.id,warehouse.id,'Cash',idempotency_key='price-test')
         assert sale.lines[0].unit_price==expected
         assert sale.total>expected
 
@@ -69,13 +81,14 @@ def test_concurrent_sales_cannot_oversell_last_unit(app):
     from concurrent.futures import ThreadPoolExecutor
     from services import complete_sale
     from models import Product, Warehouse
+    import threading
     with app.app_context():
         product=Product.query.filter_by(sku='FOO-0003').first(); warehouse=Warehouse.query.first(); user=User.query.filter_by(username='sales').first()
         level=StockLevel.query.filter_by(product_id=product.id,warehouse_id=warehouse.id).first(); level.quantity_on_hand=1; db.session.commit()
         product_id,warehouse_id,user_id=product.id,warehouse.id,user.id
     def sell_once():
         try:
-            with app.app_context(): complete_sale([{'product_id':product_id,'quantity':1}],user_id,warehouse_id,'Cash'); return True
+            with app.app_context(): complete_sale([{'product_id':product_id,'quantity':1}],user_id,warehouse_id,'Cash',idempotency_key='oversell-'+str(threading.get_ident())); return True
         except Exception: return False
     with ThreadPoolExecutor(max_workers=2) as pool: outcomes=list(pool.map(lambda _:sell_once(),range(2)))
     with app.app_context():

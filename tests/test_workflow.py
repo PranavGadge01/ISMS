@@ -38,12 +38,12 @@ def test_requested_po_receipt_sale_alert_auditor_workflow(app):
     assert client.get(f'/purchase-orders/{po_id}/print').status_code==200
     sign_in(client,'warehouse_staff')
     with app.app_context(): line_ids=[l.id for l in PurchaseOrder.query.get(po_id).lines]
-    response=client.post(f'/purchase-orders/{po_id}/receive',data={'warehouse_id':warehouse_id,str(line_ids[0]):'100',str(line_ids[1]):'1'},follow_redirects=True); assert b'Partially Received' in response.data
-    response=client.post(f'/purchase-orders/{po_id}/receive',data={'warehouse_id':warehouse_id,str(line_ids[0]):'500'},follow_redirects=True); assert b'Fully Received' in response.data
+    response=client.post(f'/purchase-orders/{po_id}/receive',data={'warehouse_id':warehouse_id,'idempotency_key':'workflow-partial-receipt',str(line_ids[0]):'100',str(line_ids[1]):'1'},follow_redirects=True); assert b'Partially Received' in response.data
+    response=client.post(f'/purchase-orders/{po_id}/receive',data={'warehouse_id':warehouse_id,'idempotency_key':'workflow-final-receipt',str(line_ids[0]):'500'},follow_redirects=True); assert b'Fully Received' in response.data
     with app.app_context():
         initial=StockLevel.query.filter_by(product_id=sale_pid,warehouse_id=warehouse_id).first().quantity_on_hand; reorder=Product.query.get(sale_pid).reorder_level
     sign_in(client,'sales_staff')
-    response=client.post('/sales/new',data={'warehouse_id':warehouse_id,'product_id':[sale_pid],'quantity':[str(initial-reorder)],'payment_method':'Cash','discount':'0','customer_name':'Walkthrough'},follow_redirects=True)
+    response=client.post('/sales/new',data={'warehouse_id':warehouse_id,'idempotency_key':'workflow-sale','product_id':[sale_pid],'quantity':[str(initial-reorder)],'payment_method':'Cash','discount':'0','customer_name':'Walkthrough'},follow_redirects=True)
     assert b'Invoice' in response.data
     with app.app_context():
         sale=SalesTransaction.query.order_by(SalesTransaction.id.desc()).first(); sale_id=sale.id; line_id=sale.lines[0].id
@@ -51,7 +51,7 @@ def test_requested_po_receipt_sale_alert_auditor_workflow(app):
     sign_in(client,'procurement_officer')
     with app.app_context(): alert=LowStockAlert.query.filter_by(product_id=sale_pid,warehouse_id=warehouse_id,status='Open').first(); alert_id=alert.id
     response=client.post('/alerts/create-po',data={'alert_id':[str(alert_id)]},follow_redirects=True); assert b'draft purchase order' in response.data.lower()
-    sign_in(client,'sales_staff'); response=client.post(f'/sales/{sale_id}/return/{line_id}',data={'quantity':'1'},follow_redirects=True); assert b'Return recorded' in response.data
+    sign_in(client,'sales_staff'); response=client.post(f'/sales/{sale_id}/return/{line_id}',data={'quantity':'1','idempotency_key':'workflow-return'},follow_redirects=True); assert b'Return recorded' in response.data
     with app.app_context(): assert SalesTransaction.query.get(sale_id).lines[0].returned_qty==1
     sign_in(client,'inventory_manager')
     response=client.post('/products/new',data={'sku':'TEST-OPEN','name':'Opening stock product','category_id':'1','cost_price':'10','selling_price':'20','reorder_level':'2','reorder_qty':'5','opening_quantity':'7','opening_warehouse_id':str(warehouse_id)},follow_redirects=True); assert b'created' in response.data

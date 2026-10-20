@@ -1,4 +1,4 @@
-import csv, io
+import csv, io, uuid
 from datetime import date, datetime, timedelta
 from flask import Blueprint, render_template, request, redirect, url_for, flash, Response, session, abort
 from werkzeug.security import generate_password_hash
@@ -307,7 +307,7 @@ def po_new():
 @role_required(*PROC,'Warehouse Staff','Auditor','Administrator')
 def po_detail(poid):
     po=PurchaseOrder.query.get_or_404(poid); receipts=StockTransaction.query.filter_by(reference=po.po_number,type='RECEIPT').order_by(StockTransaction.timestamp.desc()).all()
-    return render_template('po_detail.html',po=po,warehouses=Warehouse.query.all(),products=Product.query.filter_by(is_active=True).all(),links=ProductSupplier.query.filter_by(supplier_id=po.supplier_id).all(),receipts=receipts,stock_levels={(x.product_id,x.warehouse_id):x.quantity_on_hand for x in StockLevel.query.all()})
+    return render_template('po_detail.html',po=po,warehouses=Warehouse.query.all(),products=Product.query.filter_by(is_active=True).all(),links=ProductSupplier.query.filter_by(supplier_id=po.supplier_id).all(),receipts=receipts,receipt_idempotency_key=uuid.uuid4().hex,stock_levels={(x.product_id,x.warehouse_id):x.quantity_on_hand for x in StockLevel.query.all()})
 @bp.route('/purchase-orders/<int:poid>/lines',methods=['POST'])
 @role_required(*PROC)
 def po_add_line(poid):
@@ -394,7 +394,7 @@ def po_receive(poid):
     try:
         accept=request.form.get('accept_overdelivery')=='on'
         if accept and session_user().role not in {'Administrator','Procurement Officer'}: abort(403)
-        receive_goods(poid,request.form.get('warehouse_id',type=int),request.form,session['user_id'],accept); flash('Receipt saved and stock updated.','success')
+        receive_goods(poid,request.form.get('warehouse_id',type=int),request.form,session['user_id'],accept,request.form.get('idempotency_key')); flash('Receipt saved and stock updated.','success')
     except Exception as e: flash(str(e),'danger')
     return redirect(url_for('main.po_detail',poid=poid))
 @bp.route('/purchase-orders/<int:poid>/cancel',methods=['POST'])
@@ -424,9 +424,9 @@ def sale_new():
             discount=request.form.get('discount',type=float) or 0; subtotal=sum(x['quantity']*x['unit_price'] for x in items); setting=db.session.get(Setting,'max_discount_percent'); maximum=float(setting.value) if setting else 10
             if not items: raise ValueError('Add at least one item.')
             if discount>subtotal*maximum/100: raise ValueError(f'Discount cannot exceed {maximum}% (₹{subtotal*maximum/100:.2f}).')
-            sale=complete_sale(items,session['user_id'],request.form.get('warehouse_id',type=int),request.form.get('payment_method'),discount,request.form.get('customer_name'),request.form.get('customer_phone')); flash(f'Sale recorded: {sale.invoice_number}.','success'); return redirect(url_for('main.invoice',saleid=sale.id))
+            sale=complete_sale(items,session['user_id'],request.form.get('warehouse_id',type=int),request.form.get('payment_method'),discount,request.form.get('customer_name'),request.form.get('customer_phone'),request.form.get('idempotency_key')); flash(f'Sale recorded: {sale.invoice_number}.','success'); return redirect(url_for('main.invoice',saleid=sale.id))
         except Exception as e: db.session.rollback(); flash(str(e),'danger')
-    return render_template('sale_form.html',products=Product.query.filter_by(is_active=True).all(),warehouses=Warehouse.query.all())
+    return render_template('sale_form.html',products=Product.query.filter_by(is_active=True).all(),warehouses=Warehouse.query.all(),idempotency_key=uuid.uuid4().hex)
 @bp.route('/sales')
 @role_required(*READ)
 def sales():
@@ -438,14 +438,14 @@ def sales():
 def invoice(saleid):
     sale=SalesTransaction.query.get_or_404(saleid)
     if session_user().role=='Sales Staff' and sale.processed_by!=session['user_id']: abort(404)
-    return render_template('invoice.html',sale=sale,warehouses=Warehouse.query.all())
+    return render_template('invoice.html',sale=sale,warehouses=Warehouse.query.all(),return_idempotency_keys={line.id:uuid.uuid4().hex for line in sale.lines})
 @bp.route('/sales/<int:saleid>/return/<int:lineid>',methods=['POST'])
 @role_required(*SALE)
 def sale_return(saleid,lineid):
     line=SalesTransactionLine.query.filter_by(id=lineid,sale_id=saleid).first_or_404()
     if session_user().role=='Sales Staff' and line.sale.processed_by!=session['user_id']: abort(404)
     try:
-        process_return(lineid,request.form.get('quantity',type=int),session['user_id'],request.form.get('warehouse_id',type=int)); flash('Return recorded.','success')
+        process_return(lineid,request.form.get('quantity',type=int),session['user_id'],request.form.get('warehouse_id',type=int),request.form.get('idempotency_key')); flash('Return recorded.','success')
     except Exception as e: flash(str(e),'danger')
     return redirect(url_for('main.invoice',saleid=saleid))
 

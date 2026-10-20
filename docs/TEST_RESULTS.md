@@ -23,6 +23,9 @@
 | `python -m pytest -q --basetemp .pytest_tmp3 <four regression tests>` with `PYTHONPATH=.venv\packages` | **4 passed** in 29.31 s. |
 | `python -m pytest -q --basetemp .pytest_tmp_full` with `PYTHONPATH=.venv\packages` | Previous run: **20 passed** in 144.72 s. |
 | `python -m pytest -q --basetemp .pytest_tmp_user_rerun` with `PYTHONPATH=.venv\packages` | Re-run on 2026-10-20: **20 passed** in 165.65 s; 3,472 warnings. |
+| `python -m pytest -q --basetemp .pytest_tmp_final` with `PYTHONPATH=.venv\packages` | Re-run on 2026-10-20 after durable idempotency changes: **24 passed**, 4,147 warnings. |
+| `python -m compileall -q app.py auth.py models.py permissions.py seed.py services.py api routes tests` | Re-run after idempotency changes: passed. |
+| `pnpm run build` in `frontend/` | Re-run after idempotency changes: passed with Vite 6.4.4 in 2.83 s. |
 | `python app.py` with `PORT=5001`, `ISMS_ENV=development`, `PYTHONPATH=.venv\packages`; then `Invoke-WebRequest http://127.0.0.1:5001/` | Flask started successfully; HTTP probe failed with Windows socket error 10013 (socket access forbidden by sandbox). Server stopped after the probe. |
 
 The first pytest rerun without an in-workspace basetemp hit Windows sandbox temp-directory permissions. A subsequent run against a reused temp path also hit Windows SQLite file-lock cleanup errors. The passing run used a fresh workspace-local basetemp.
@@ -34,9 +37,9 @@ The first pytest rerun without an in-workspace basetemp hit Windows sandbox temp
 - Role-permission results: the existing tests cover selected reads/writes for all six roles and Auditor read-only behavior; added Auditor business-audit/security-log assertions were included in the passing 16-test run.
 - Frontend build: passed.
 - Frontend browser E2E, lint, type check, clean production migration, and concurrent stress tests: not run.
-- Regression tests for cross-user returns, server price authority, draft ownership/price overrides, and concurrent last-unit sales passed in the fresh full-suite rerun.
+- Regression tests for cross-user returns, server price authority, draft ownership/price overrides, concurrent last-unit sales, and sale/receipt/return idempotency passed in the latest full-suite rerun. API sale tests also verify the required idempotency key, successful replay, and conflicting-payload rejection.
 - The server process started but a live HTTP/UI smoke check could not reach loopback from this sandbox. No browser E2E verification is claimed.
 
 ## Known warnings and limits
 
-The full suite emitted 3,472 warnings, mainly from `datetime.utcnow()` deprecations and SQLAlchemy `Query.get()` use. The implementation is not ready to claim full security, endpoint, or workflow completion. Known remaining defects and setup limitations are listed in `docs/IMPLEMENTATION_AUDIT.md`.
+The latest full suite emitted 4,147 warnings, mainly from `datetime.utcnow()` deprecations and SQLAlchemy `Query.get()` use. The implementation is not ready to claim full security, endpoint, or workflow completion. Known remaining defects and setup limitations are listed in `docs/IMPLEMENTATION_AUDIT.md`.

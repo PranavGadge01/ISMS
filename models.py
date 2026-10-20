@@ -65,3 +65,8 @@ class Notification(db.Model):
 
 class AuditLog(db.Model):
     id=db.Column(db.Integer,primary_key=True); actor_id=db.Column(db.Integer,db.ForeignKey('user.id')); event_type=db.Column(db.String(80),nullable=False); target_type=db.Column(db.String(80),nullable=False); target_id=db.Column(db.String(80)); outcome=db.Column(db.String(20),nullable=False,default='success'); details=db.Column(db.Text); timestamp=db.Column(db.DateTime,default=datetime.utcnow,nullable=False); actor=db.relationship('User')
+
+class IdempotencyRecord(db.Model):
+    id=db.Column(db.Integer,primary_key=True); operation=db.Column(db.String(40),nullable=False); user_id=db.Column(db.Integer,db.ForeignKey('user.id'),nullable=False); key=db.Column(db.String(128),nullable=False); request_hash=db.Column(db.String(64),nullable=False); resource_type=db.Column(db.String(40)); resource_id=db.Column(db.String(80)); created_at=db.Column(db.DateTime,default=datetime.utcnow,nullable=False)
+    __table_args__=(db.UniqueConstraint('operation','user_id','key',name='uq_idempotency_operation_user_key'),)
+    user=db.relationship('User')

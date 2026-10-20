@@ -45,7 +45,7 @@ Source inventory: `api/__init__.py` at upstream snapshot `7d031beb2a8b6ff3044e54
 | POST | `/api/purchase-orders/<poid>/approve` | `po.approve`; approver, pending state, separation of duties | `test_api_permissions.py`, `test_workflow.py` |
 | POST | `/api/purchase-orders/<poid>/reject` | `po.approve`; reason required | — |
 | POST | `/api/purchase-orders/<poid>/send` | `po.send`; Approved only | `test_workflow.py` |
-| POST | `/api/purchase-orders/<poid>/receive` | `po.receive`; eligible PO; actual quantities; over-delivery permission | `test_isms.py`, `test_workflow.py` |
+| POST | `/api/purchase-orders/<poid>/receive` | `po.receive`; eligible PO; actual quantities; over-delivery permission; required `Idempotency-Key` header or body field; identical retry replays, conflicting payload returns 409 | `test_isms.py`, `test_workflow.py` |
 | POST | `/api/purchase-orders/<poid>/cancel` | Authenticated; role/status/reason gate | — |
 | GET | `/api/approvals` | `approval.history`; approver-scoped pending queues | `test_api_permissions.py` |
 | POST | `/api/approvals/stock/<rid>/<decision>` | `stock.adjust.approve`; decision/reason and no self-approval | — |
@@ -55,9 +55,9 @@ Source inventory: `api/__init__.py` at upstream snapshot `7d031beb2a8b6ff3044e54
 | POST | `/api/notifications/read-all` | Authenticated; own notifications only | — |
 | PUT | `/api/notifications/<nid>/read` | Authenticated; own notification only | — |
 | GET | `/api/sales` | `sale.view.all`; Sales Staff filtered to own | `test_api_permissions.py` |
-| POST | `/api/sales` | `sale.create`; server price, discount and stock validation | `test_workflow.py`, added price regression test |
+| POST | `/api/sales` | `sale.create`; server price, discount and stock validation; required `Idempotency-Key` header or body field (428 missing, 409 conflicting payload; replay returns 200) | `test_workflow.py`, price and idempotency regression tests |
 | GET | `/api/sales/<sid>` | `sale.view.all`; Sales Staff own record only | — |
-| POST | `/api/sales/<sid>/returns/<lineid>` | `sale.return`; original sale line, remaining quantity, salesperson ownership | `test_workflow.py`, added ownership regression test |
+| POST | `/api/sales/<sid>/returns/<lineid>` | `sale.return`; original sale line, remaining quantity, salesperson ownership; required idempotency key (428 missing, 409 conflicting payload) | `test_workflow.py`, ownership and idempotency regression tests |
 | GET | `/api/users` | `user.manage` | `test_api_permissions.py` |
 | POST | `/api/users` | `user.manage`; username/email/password/role validation | — |
 | PUT | `/api/users/<uid>` | `user.manage`; supported role and last-admin guard | — |

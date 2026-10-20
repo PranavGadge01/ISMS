@@ -5,7 +5,7 @@ from flask import Blueprint, jsonify, request, session, Response
 from werkzeug.security import check_password_hash, generate_password_hash
 from models import db, User, LoginLog, Product, Category, Warehouse, StockLevel, StockTransaction, Supplier, ProductSupplier, PurchaseOrder, PurchaseOrderLine, SalesTransaction, SalesTransactionLine, LowStockAlert, Setting, Notification, StockAdjustmentRequest, POHistory, GoodsReceipt, AuditLog
 from permissions import permission_required, permissions_for
-from services import adjust_stock, transfer_stock, stock_count, receive_goods, complete_sale, process_return, check_low_stock, StockError, notify_user, notify_roles, _change, record_audit, request_stock_adjustment
+from services import adjust_stock, transfer_stock, stock_count, receive_goods, complete_sale, process_return, check_low_stock, StockError, IdempotencyConflict, notify_user, notify_roles, _change, record_audit, request_stock_adjustment
 
 api=Blueprint('api',__name__,url_prefix='/api')
 
@@ -340,8 +340,11 @@ def po_send_api(poid):
 @permission_required('po.receive')
 def po_receive_api(poid):
     b=request.get_json(silent=True) or {}; user=_user()
+    key=request.headers.get('Idempotency-Key') or b.get('idempotency_key')
+    if not key: return jsonify(error='Idempotency-Key is required for goods receipt.'),428
     if b.get('accept_overdelivery') and 'po.receive.over' not in permissions_for(user): return jsonify(error='Only Procurement or Administrator can accept over-delivery.'),403
-    try: p=receive_goods(poid,int(b.get('warehouse_id')),b.get('quantities',{}),user.id,bool(b.get('accept_overdelivery'))); return jsonify(_po(p))
+    try: p=receive_goods(poid,int(b.get('warehouse_id')),b.get('quantities',{}),user.id,bool(b.get('accept_overdelivery')),key); return jsonify(_po(p))
+    except IdempotencyConflict as e: return jsonify(error=str(e)),409
     except Exception as e: return jsonify(error=str(e)),400
 @api.post('/purchase-orders/<int:poid>/cancel')
 def po_cancel_api(poid):
@@ -421,6 +424,8 @@ def sales_api():
 @permission_required('sale.create')
 def sale_create_api():
     b=request.get_json(silent=True) or {}; row=db.session.get(Setting,'max_discount_percent'); maxpct=float(row.value) if row else 10; items=[]
+    key=request.headers.get('Idempotency-Key') or b.get('idempotency_key')
+    if not key: return jsonify(error='Idempotency-Key is required for sale creation.'),428
     try:
         for item in b.get('items',[]):
             p=Product.query.get_or_404(int(item.get('product_id')))
@@ -428,7 +433,8 @@ def sale_create_api():
             items.append({'product_id':p.id,'quantity':int(item.get('quantity') or 0),'unit_price':p.selling_price})
         subtotal=sum(x['quantity']*x['unit_price'] for x in items); discount_percent=float(b.get('discount_percent',0)); discount=subtotal*discount_percent/100
         if discount_percent<0 or discount_percent>maxpct: return jsonify(error=f'Discount exceeds the allowed {maxpct}%.',fields={'discount_percent':'Exceeds configured limit.'}),400
-        s=complete_sale(items,_user().id,int(b.get('warehouse_id')),b.get('payment_method'),discount,b.get('customer_name'),b.get('customer_phone')); return jsonify(_sale(s)),201
+        s=complete_sale(items,_user().id,int(b.get('warehouse_id')),b.get('payment_method'),discount,b.get('customer_name'),b.get('customer_phone'),key); return jsonify(_sale(s)),200 if getattr(s,'_idempotency_replayed',False) else 201
+    except IdempotencyConflict as e: return jsonify(error=str(e)),409
     except Exception as e: return jsonify(error=str(e)),400
 @api.get('/sales/<int:sid>')
 @permission_required('sale.view.all')
@@ -442,7 +448,10 @@ def return_api(sid,lineid):
     line=SalesTransactionLine.query.filter_by(id=lineid,sale_id=sid).first_or_404()
     user=_user()
     if user.role=='Sales Staff' and line.sale.processed_by!=user.id: return jsonify(error='Not found.'),404
-    try: process_return(lineid,int((request.get_json(silent=True) or {}).get('quantity',0)),_user().id); return jsonify(_sale(line.sale))
+    b=request.get_json(silent=True) or {}; key=request.headers.get('Idempotency-Key') or b.get('idempotency_key')
+    if not key: return jsonify(error='Idempotency-Key is required for returns.'),428
+    try: process_return(lineid,int(b.get('quantity',0)),_user().id,idempotency_key=key); return jsonify(_sale(line.sale))
+    except IdempotencyConflict as e: return jsonify(error=str(e)),409
     except Exception as e: return jsonify(error=str(e)),400
 
 @api.get('/users')
